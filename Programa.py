@@ -1,12 +1,11 @@
 import threading
 
-
-# ----------------------------
-# Utilidades (sin usar otras librerías)
-# ----------------------------
+# ============================================================
+# Utilidades (sin random ni sleep para sincronización)
+# ============================================================
 
 class LCG:
-    """Pseudo-random simple (sin random)."""
+    """Generador pseudo-aleatorio simple (sin usar random)."""
     def __init__(self, seed: int):
         self.state = seed & 0x7fffffff
 
@@ -16,21 +15,17 @@ class LCG:
 
 
 def spin(n: int) -> None:
-    """Pequeño trabajo ocupado para variar tiempos sin sleep/time."""
+    """Trabajo ocupado para simular tiempo."""
     x = 0
     for _ in range(n):
         x ^= (x << 1) & 0xFFFFFFFF
 
 
-# ----------------------------
-# Lock estilo Lamport Bakery (sin Lock/Semaphore/Condition de threading)
-# ----------------------------
+# ============================================================
+# Bakery Lock (Exclusión mutua manual)
+# ============================================================
 
 class BakeryLock:
-    """
-    Lamport's Bakery Algorithm para exclusión mutua entre N hilos.
-    Requiere que cada hilo tenga un id único en [0, N-1].
-    """
     def __init__(self, n: int):
         self.n = n
         self.choosing = [False] * n
@@ -38,39 +33,30 @@ class BakeryLock:
 
     def acquire(self, tid: int) -> None:
         self.choosing[tid] = True
-
-        # number[tid] = 1 + max(number)
-        maxnum = 0
-        for v in self.number:
-            if v > maxnum:
-                maxnum = v
-        self.number[tid] = maxnum + 1
-
+        self.number[tid] = 1 + max(self.number)
         self.choosing[tid] = False
 
         for j in range(self.n):
             if j == tid:
                 continue
-
             while self.choosing[j]:
                 pass
-
-            while self.number[j] != 0:
-                nj = self.number[j]
-                ni = self.number[tid]
-                if nj < ni or (nj == ni and j < tid):
-                    continue
-                break
+            while self.number[j] != 0 and (
+                self.number[j] < self.number[tid] or
+                (self.number[j] == self.number[tid] and j < tid)
+            ):
+                pass
 
     def release(self, tid: int) -> None:
         self.number[tid] = 0
 
 
+# ============================================================
+# Semáforo Manual
+# ============================================================
+
 class Semaphore:
-    """Semáforo construido encima de BakeryLock (sin threading.Semaphore)."""
     def __init__(self, initial: int, nthreads: int):
-        if initial < 0:
-            raise ValueError("Semaphore initial must be >= 0")
         self.value = initial
         self.mutex = BakeryLock(nthreads)
 
@@ -82,7 +68,6 @@ class Semaphore:
                 self.mutex.release(tid)
                 return
             self.mutex.release(tid)
-            # Spin pequeño para no quemar 100% en el mismo punto siempre
             spin(200)
 
     def signal(self, tid: int) -> None:
@@ -91,11 +76,11 @@ class Semaphore:
         self.mutex.release(tid)
 
 
-# ----------------------------
-# Readers-Writers con PRIORIDAD a ESCRITORES
-# ----------------------------
+# ============================================================
+# Monitor Portal Académico (Prioridad a Profesores)
+# ============================================================
 
-class RWWriterPriority:
+class PortalAcademico:
     def __init__(self, nthreads: int):
         # Semáforos del algoritmo clásico de prioridad escritores
         self.resource = Semaphore(1, nthreads)   # controla acceso al recurso compartido
@@ -106,20 +91,25 @@ class RWWriterPriority:
         self.read_count = 0
         self.write_count = 0
 
-        # Solo para logs/validación (no es parte del algoritmo)
-        self.print_mutex = Semaphore(1, nthreads)
+        # Estado del sistema
+        self.notas = {"Sistemas Operativos": 0}
+
+        # Solo para validación
         self.state_mutex = Semaphore(1, nthreads)
-        self.active_readers = 0
-        self.active_writers = 0
+        self.print_mutex = Semaphore(1, nthreads)
+        self.lectores_activos = 0
+        self.escritores_activos = 0
 
-        self.shared_value = 0
-
-    def log(self, tid: int, msg: str) -> None:
+    def log(self, tid: int, mensaje: str):
         self.print_mutex.wait(tid)
-        print(msg)
+        print(mensaje)
         self.print_mutex.signal(tid)
 
-    def reader_enter(self, tid: int) -> None:
+    # =============================
+    # LECTORES (Estudiantes)
+    # =============================
+
+    def estudiante_entra(self, tid: int):
         self.readTry.wait(tid)
         self.rmutex.wait(tid)
 
@@ -130,172 +120,147 @@ class RWWriterPriority:
         self.rmutex.signal(tid)
         self.readTry.signal(tid)
 
-    def reader_exit(self, tid: int) -> None:
+    def estudiante_sale(self, tid: int):
         self.rmutex.wait(tid)
-
         self.read_count -= 1
         if self.read_count == 0:
             self.resource.signal(tid)
-
         self.rmutex.signal(tid)
 
-    def writer_enter(self, tid: int) -> None:
-        self.wmutex.wait(tid)
+    # =============================
+    # ESCRITORES (Profesores)
+    # =============================
 
+    def profesor_entra(self, tid: int):
+        self.wmutex.wait(tid)
         self.write_count += 1
         if self.write_count == 1:
             self.readTry.wait(tid)
-
         self.wmutex.signal(tid)
 
         self.resource.wait(tid)
 
-    def writer_exit(self, tid: int) -> None:
+    def profesor_sale(self, tid: int):
         self.resource.signal(tid)
 
         self.wmutex.wait(tid)
-
         self.write_count -= 1
         if self.write_count == 0:
             self.readTry.signal(tid)
-
         self.wmutex.signal(tid)
 
-    # Helpers para validar (opcional)
-    def begin_read_cs(self, tid: int) -> None:
+    # =============================
+    # Validación de exclusión
+    # =============================
+
+    def begin_read_cs(self, tid: int):
         self.state_mutex.wait(tid)
-        self.active_readers += 1
-        # En prioridad escritores, nunca debe haber escritor activo mientras se lee
-        if self.active_writers != 0:
-            self.log(tid, f"[ERROR] Lector {tid}: active_writers={self.active_writers} != 0")
+        self.lectores_activos += 1
+        if self.escritores_activos != 0:
+            self.log(tid, "ERROR: estudiante leyendo mientras profesor escribe")
         self.state_mutex.signal(tid)
 
-    def end_read_cs(self, tid: int) -> None:
+    def end_read_cs(self, tid: int):
         self.state_mutex.wait(tid)
-        self.active_readers -= 1
+        self.lectores_activos -= 1
         self.state_mutex.signal(tid)
 
-    def begin_write_cs(self, tid: int) -> None:
+    def begin_write_cs(self, tid: int):
         self.state_mutex.wait(tid)
-        self.active_writers += 1
-        # Nunca debe haber lectores/escritores simultáneos con un escritor
-        if self.active_writers != 1 or self.active_readers != 0:
-            self.log(tid, f"[ERROR] Escritor {tid}: active_writers={self.active_writers}, active_readers={self.active_readers}")
+        self.escritores_activos += 1
+        if self.escritores_activos != 1 or self.lectores_activos != 0:
+            self.log(tid, "ERROR: violación exclusión mutua en escritura")
         self.state_mutex.signal(tid)
 
-    def end_write_cs(self, tid: int) -> None:
+    def end_write_cs(self, tid: int):
         self.state_mutex.wait(tid)
-        self.active_writers -= 1
+        self.escritores_activos -= 1
         self.state_mutex.signal(tid)
 
 
-def run_timer(stop_event: threading.Event, seconds: int) -> None:
-    stop_event.wait(seconds)   # usa SOLO threading para temporizar
-    stop_event.set()
+# ============================================================
+# Threads
+# ============================================================
 
+def estudiante_thread(tid, portal, stop_event):
+    prng = LCG(1000 + tid)
+    iteracion = 0
 
-def reader_thread(tid: int, rw: RWWriterPriority, stop_event: threading.Event, stats: list[int]) -> None:
-    prng = LCG(1234567 + tid * 101)
-
-    it = 0
     while not stop_event.is_set():
-        # Intentar entrar
-        rw.reader_enter(tid)
+        portal.estudiante_entra(tid)
 
-        # Sección crítica (lectura)
-        rw.begin_read_cs(tid)
-        value = rw.shared_value
-        rw.log(tid, f"[R{tid}] >>> ENTRA  CS (iter={it}) lee={value}")
-        spin(1000 + (prng.next() % 2000))
-        rw.log(tid, f"[R{tid}] <<< SALE   CS (iter={it}) lee={value}")
-        rw.end_read_cs(tid)
+        portal.begin_read_cs(tid)
+        nota = portal.notas["Sistemas Operativos"]
+        portal.log(tid, f"[ESTUDIANTE {tid}] >>> Consultando nota: {nota}")
+        spin(1500 + prng.next() % 3000)
+        portal.log(tid, f"[ESTUDIANTE {tid}] <<< Sale del portal")
+        portal.end_read_cs(tid)
 
-        rw.reader_exit(tid)
-
-        stats[tid] += 1
-        it += 1
-        spin(800 + (prng.next() % 2500))
+        portal.estudiante_sale(tid)
+        spin(1000 + prng.next() % 4000)
+        iteracion += 1
 
 
-def writer_thread(tid: int, rw: RWWriterPriority, stop_event: threading.Event, stats: list[int]) -> None:
-    prng = LCG(7654321 + tid * 313)
+def profesor_thread(tid, portal, stop_event):
+    prng = LCG(9000 + tid)
+    iteracion = 0
 
-    it = 0
     while not stop_event.is_set():
-        rw.writer_enter(tid)
+        portal.profesor_entra(tid)
 
-        # Sección crítica (escritura)
-        rw.begin_write_cs(tid)
-        before = rw.shared_value
-        rw.log(tid, f"[W{tid}] >>> ENTRA  CS (iter={it}) antes={before}")
-        spin(2000 + (prng.next() % 3500))
-        rw.shared_value = before + 1
-        after = rw.shared_value
-        rw.log(tid, f"[W{tid}] <<< SALE   CS (iter={it}) despues={after}")
-        rw.end_write_cs(tid)
+        portal.begin_write_cs(tid)
+        nota_anterior = portal.notas["Sistemas Operativos"]
+        nueva_nota = nota_anterior + 1
+        portal.log(tid, f"!!! [PROFESOR {tid}] >>> Publicando nueva nota: {nueva_nota}")
+        spin(3000 + prng.next() % 5000)
+        portal.notas["Sistemas Operativos"] = nueva_nota
+        portal.log(tid, f"!!! [PROFESOR {tid}] <<< Actualización finalizada")
+        portal.end_write_cs(tid)
 
-        rw.writer_exit(tid)
-
-        stats[tid] += 1
-        it += 1
-        spin(1200 + (prng.next() % 4000))
+        portal.profesor_sale(tid)
+        spin(2000 + prng.next() % 5000)
+        iteracion += 1
 
 
-def main() -> None:
-    # Configurable (puedes cambiar aquí)
-    NUM_READERS = 5
-    NUM_WRITERS = 3
-    DURATION_SECONDS = 60  # mínimo 60
+# ============================================================
+# MAIN
+# ============================================================
 
-    if DURATION_SECONDS < 60:
-        DURATION_SECONDS = 60
+def main():
+    res_est = input("Cantidad de estudiantes: (default 15)")
+    NUM_ESTUDIANTES = int(res_est) if res_est.strip() else 15
+    res_prof = input("Cantidad de profesores: (default 5)")
+    NUM_PROFESORES = int(res_prof) if res_prof.strip() else 5
+    res_dur = input("Duración en segundos (default 300s / 5min): ")
+    DURACION = int(res_dur) if res_dur.strip() else 300
+    
 
-    nthreads = NUM_READERS + NUM_WRITERS
-    rw = RWWriterPriority(nthreads)
+    nthreads = NUM_ESTUDIANTES + NUM_PROFESORES
+    portal = PortalAcademico(nthreads)
 
     stop_event = threading.Event()
-    stats = [0] * nthreads
+    threads = []
 
-    threads: list[threading.Thread] = []
+    for i in range(NUM_ESTUDIANTES):
+        threads.append(threading.Thread(target=estudiante_thread, args=(i, portal, stop_event)))
 
-    # Crear lectores (tid 0..NUM_READERS-1)
-    for i in range(NUM_READERS):
-        t = threading.Thread(target=reader_thread, args=(i, rw, stop_event, stats), name=f"Reader-{i}")
-        threads.append(t)
+    for i in range(NUM_PROFESORES):
+        tid = NUM_ESTUDIANTES + i
+        threads.append(threading.Thread(target=profesor_thread, args=(tid, portal, stop_event)))
 
-    # Crear escritores (tid NUM_READERS..nthreads-1)
-    for k in range(NUM_WRITERS):
-        tid = NUM_READERS + k
-        t = threading.Thread(target=writer_thread, args=(tid, rw, stop_event, stats), name=f"Writer-{tid}")
-        threads.append(t)
-
-    timer = threading.Thread(target=run_timer, args=(stop_event, DURATION_SECONDS), name="Timer")
-
-    # Iniciar
     for t in threads:
         t.start()
-    timer.start()
 
-    # Esperar fin
-    timer.join()
+    stop_event.wait(DURACION)
+    stop_event.set()
+
     for t in threads:
         t.join()
 
-    # Resumen
-    total_reads = 0
-    total_writes = 0
-    for tid in range(nthreads):
-        if tid < NUM_READERS:
-            total_reads += stats[tid]
-        else:
-            total_writes += stats[tid]
-
-    print("\n=== RESUMEN ===")
-    print(f"Lectores: {NUM_READERS} | Escritores: {NUM_WRITERS} | Duración: {DURATION_SECONDS}s")
-    print(f"Operaciones lectura:  {total_reads}")
-    print(f"Operaciones escritura:{total_writes}")
-    print(f"Valor final compartido: {rw.shared_value}")
+    print("\n=== SIMULACIÓN FINALIZADA ===")
+    print("Nota final publicada:", portal.notas["Sistemas Operativos"])
 
 
 if __name__ == "__main__":
     main()
+    
