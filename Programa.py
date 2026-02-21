@@ -87,6 +87,10 @@ class PortalAcademico:
         self.rmutex = Semaphore(1, nthreads)     # protege read_count
         self.wmutex = Semaphore(1, nthreads)     # protege write_count
         self.readTry = Semaphore(1, nthreads)    # bloquea lectores si hay escritores esperando
+        self.total_lecturas = 0
+        self.total_escrituras = 0
+        self.max_lectores_simultaneos = 0
+        self.max_escritores_simultaneos = 0
 
         self.read_count = 0
         self.write_count = 0
@@ -154,11 +158,17 @@ class PortalAcademico:
     # =============================
 
     def begin_read_cs(self, tid: int):
+        error = False
         self.state_mutex.wait(tid)
         self.lectores_activos += 1
+        self.total_lecturas += 1
         if self.escritores_activos != 0:
-            self.log(tid, "ERROR: estudiante leyendo mientras profesor escribe")
+            error = True
+        if self.lectores_activos > self.max_lectores_simultaneos:
+            self.max_lectores_simultaneos = self.lectores_activos
         self.state_mutex.signal(tid)
+        if error:
+            self.log(tid, "ERROR: estudiante leyendo mientras profesor escribe")
 
     def end_read_cs(self, tid: int):
         self.state_mutex.wait(tid)
@@ -166,11 +176,17 @@ class PortalAcademico:
         self.state_mutex.signal(tid)
 
     def begin_write_cs(self, tid: int):
+        error = False
         self.state_mutex.wait(tid)
         self.escritores_activos += 1
+        self.total_escrituras += 1
         if self.escritores_activos != 1 or self.lectores_activos != 0:
-            self.log(tid, "ERROR: violación exclusión mutua en escritura")
+            error = True
+        if self.escritores_activos > self.max_escritores_simultaneos:
+            self.max_escritores_simultaneos = self.escritores_activos
         self.state_mutex.signal(tid)
+        if error:
+            self.log(tid, "ERROR: violación exclusión mutua en escritura")
 
     def end_write_cs(self, tid: int):
         self.state_mutex.wait(tid)
@@ -260,7 +276,12 @@ def main():
     print("\n=== SIMULACIÓN FINALIZADA ===")
     print("Nota final publicada:", portal.notas["Sistemas Operativos"])
 
+    print("\n=== MÉTRICAS ===")
+    print("Total lecturas:", portal.total_lecturas)
+    print("Total escrituras:", portal.total_escrituras)
+    print("Máx lectores simultáneos:", portal.max_lectores_simultaneos)
+    print("Máx escritores simultáneos:", portal.max_escritores_simultaneos)
+
 
 if __name__ == "__main__":
     main()
-    
